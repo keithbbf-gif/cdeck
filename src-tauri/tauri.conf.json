@@ -28,6 +28,9 @@
   "bundle": {
     "active": true,
     "targets": ["msi", "nsis"],
+    "category": "Utility",
+    "shortDescription": "Standalone COSMOS dashboard for Windows 10",
+    "longDescription": "cDeck is a native Windows control deck for COSMOS. It reads the live HTTP API and renders Status, Health, Spend, Jobs, Rails, Makers, CREATE, a command bar, and an append-only event feed.",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

@@ -427,6 +427,13 @@
     eventsInflight = true;
     apiGet("/api/v1/events?since_seq=" + lastSeq).then(function (d) {
       eventsInflight = false;
+      if (typeof d.head_seq === "number" && d.head_seq < lastSeq) {
+        lastSeq = 0;
+        feedHasEvents = false;
+        $("feed").innerHTML = '<div class="empty">ledger rewind — restarting feed at seq 0</div>';
+        pollEvents();
+        return;
+      }
       markSuccess("events", Date.now());
       var feed = $("feed");
       var evs = d.events || [];
@@ -590,21 +597,33 @@
     });
   }
 
+  function sanitizeFrontUrl(raw) {
+    var url = String(raw || "").trim().replace(/\/+$/, "");
+    if (!url) return { err: "server URL required" };
+    if (url.indexOf("http://") !== 0 && url.indexOf("https://") !== 0) {
+      return { err: "server URL must start with http:// or https://" };
+    }
+    var rest = url.split("://")[1] || "";
+    if (rest.indexOf("@") >= 0) {
+      return { err: "server URL must not contain credentials (user:pass@host)" };
+    }
+    return { url: url };
+  }
+
   function doConnect() {
-    var newBase = $("apiBase").value.trim();
-    if (!newBase) {
-      $("connState").textContent = "server URL required";
+    var parsed = sanitizeFrontUrl($("apiBase").value);
+    if (parsed.err) {
+      $("connState").textContent = parsed.err;
       $("connState").className = "bad";
       return;
     }
-    if (newBase !== cfg.base) {
-      lastSeq = 0;
-      feedHasEvents = false;
-      $("feed").innerHTML = '<div class="empty">connecting — the ledger tail streams here</div>';
-      panels.events.measuredAtMs = null;
-      panels.events.error = null;
-    }
-    cfg.base = newBase.replace(/\/+$/, "");
+    var newBase = parsed.url;
+    lastSeq = 0;
+    feedHasEvents = false;
+    $("feed").innerHTML = '<div class="empty">connecting — the ledger tail streams here</div>';
+    panels.events.measuredAtMs = null;
+    panels.events.error = null;
+    cfg.base = newBase;
     cfg.token = $("token").value.trim();
     persistUrl(cfg.base);
     connected = true;

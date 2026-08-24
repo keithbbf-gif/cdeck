@@ -30,6 +30,7 @@ No secrets belong in this repo.
 - Windows 10 (or later) with [WebView2](https://developer.microsoft.com/microsoft-edge/webview2/) (bundled with recent Edge; the installer can fetch it)
 - [Node.js](https://nodejs.org/) 20+
 - [Rust](https://rustup.rs/) stable (MSVC toolchain on Windows: `rustup default stable-msvc`)
+- Visual Studio 2022 [Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/) with the **Desktop development with C++** workload (`link.exe`). GitHub Actions `windows-latest` already has this.
 - A running COSMOS service on port **8791** (or whatever URL you configure)
 
 ## Run (dev)

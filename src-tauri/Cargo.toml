@@ -6,6 +6,11 @@ authors = ["Keith"]
 edition = "2021"
 rust-version = "1.77"
 
+# Must not share the package name: Windows cannot emit both cdeck.exe and cdeck.dll.
+[lib]
+name = "cdeck_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
