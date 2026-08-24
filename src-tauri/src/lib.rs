@@ -37,25 +37,44 @@ fn config_path(app: &AppHandle) -> Result<std::path::PathBuf, String> {
     Ok(dir.join("config.json"))
 }
 
+/// Reduce the pasted server URL to a bare ORIGIN (scheme://host[:port]).
+///
+/// This is a real parse, not string-prefix checking: anything carrying a
+/// path, query, or fragment is rejected, so `format!("{base}{path}")`
+/// downstream cannot be diverted onto a different resource.
 fn sanitize_url(raw: &str) -> Result<String, String> {
-    let url = raw.trim().trim_end_matches('/').to_string();
-    if url.is_empty() {
+    let raw = raw.trim();
+    if raw.is_empty() {
         return Err("server URL is required".into());
     }
-    if !(url.starts_with("http://") || url.starts_with("https://")) {
+    if !(raw.starts_with("http://") || raw.starts_with("https://")) {
         return Err("server URL must start with http:// or https://".into());
+    }
+    let url = reqwest::Url::parse(raw).map_err(|e| format!("invalid server URL: {e}"))?;
+    match url.scheme() {
+        "http" | "https" => {}
+        _ => return Err("server URL must start with http:// or https://".into()),
     }
     // Refuse embedded credentials so a pasted `http://user:token@host` cannot
     // land on disk. The bearer field is the only place a secret may live, and
     // it is memory-only.
-    let rest = url
-        .split_once("://")
-        .map(|(_, r)| r)
-        .unwrap_or(url.as_str());
-    if rest.contains('@') {
+    if !url.username().is_empty() || url.password().is_some() {
         return Err("server URL must not contain credentials (user:pass@host)".into());
     }
-    Ok(url)
+    let host = url
+        .host_str()
+        .ok_or_else(|| "server URL must include a host".to_string())?;
+    if !matches!(url.path(), "" | "/") {
+        return Err("server URL must be an origin only — remove the path".into());
+    }
+    if url.query().is_some() || url.fragment().is_some() {
+        return Err("server URL must be an origin only — remove the query/fragment".into());
+    }
+    let mut origin = format!("{}://{host}", url.scheme());
+    if let Some(port) = url.port() {
+        origin.push_str(&format!(":{port}"));
+    }
+    Ok(origin)
 }
 
 fn sanitize_api_path(raw: &str) -> Result<String, String> {
@@ -72,18 +91,44 @@ fn sanitize_api_path(raw: &str) -> Result<String, String> {
     Ok(path.to_string())
 }
 
+/// What `load_config` hands the UI: the config plus an optional non-fatal
+/// warning (e.g. malformed config.json) so a silent reset never masquerades
+/// as a clean load.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LoadedConfig {
+    server_url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    warning: Option<String>,
+}
+
 #[tauri::command]
-fn load_config(app: AppHandle) -> Result<AppConfig, String> {
+fn load_config(app: AppHandle) -> Result<LoadedConfig, String> {
     let path = config_path(&app)?;
     if !path.exists() {
-        return Ok(AppConfig::default());
+        return Ok(LoadedConfig {
+            server_url: AppConfig::default().server_url,
+            warning: None,
+        });
     }
     let raw = std::fs::read_to_string(&path).map_err(|e| format!("read config: {e}"))?;
-    let mut cfg: AppConfig = serde_json::from_str(&raw).unwrap_or_default();
+    let (mut cfg, warning) = match serde_json::from_str::<AppConfig>(&raw) {
+        Ok(c) => (c, None),
+        Err(e) => (
+            AppConfig::default(),
+            Some(format!(
+                "config.json is malformed ({e}) — using default server URL {DEFAULT_URL}; \
+                 CONNECT will rewrite it"
+            )),
+        ),
+    };
     if cfg.server_url.trim().is_empty() {
         cfg.server_url = DEFAULT_URL.to_string();
     }
-    Ok(cfg)
+    Ok(LoadedConfig {
+        server_url: cfg.server_url,
+        warning,
+    })
 }
 
 #[tauri::command]
@@ -133,7 +178,10 @@ async fn api_request(
     let client = reqwest::Client::builder()
         .timeout(FETCH_TIMEOUT)
         .connect_timeout(CONNECT_TIMEOUT)
-        .redirect(reqwest::redirect::Policy::limited(2))
+        // No automatic redirect following: a 3xx from the COSMOS host could
+        // otherwise send the bearer to an arbitrary Location (SSRF). A 3xx is
+        // surfaced to the UI as a plain non-ok status instead.
+        .redirect(reqwest::redirect::Policy::none())
         .user_agent("cDeck/0.1")
         .build()
         .map_err(|e| format!("HTTP client: {e}"))?;
@@ -207,6 +255,26 @@ mod tests {
     #[test]
     fn sanitize_rejects_non_http() {
         assert!(sanitize_url("ftp://127.0.0.1:8791").is_err());
+    }
+
+    #[test]
+    fn sanitize_rejects_path_query_fragment() {
+        assert!(sanitize_url("http://127.0.0.1:8791/evil").is_err());
+        assert!(sanitize_url("http://127.0.0.1:8791/api/v1").is_err());
+        assert!(sanitize_url("http://127.0.0.1:8791/?x=1").is_err());
+        assert!(sanitize_url("http://127.0.0.1:8791/#frag").is_err());
+    }
+
+    #[test]
+    fn sanitize_normalizes_to_origin() {
+        assert_eq!(
+            sanitize_url("https://cosmos.example.com").unwrap(),
+            "https://cosmos.example.com"
+        );
+        assert_eq!(
+            sanitize_url("http://192.168.1.10:8791/").unwrap(),
+            "http://192.168.1.10:8791"
+        );
     }
 
     #[test]

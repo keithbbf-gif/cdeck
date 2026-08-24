@@ -107,6 +107,8 @@ button.on{border-color:var(--cyan);color:var(--head)}
 .age::after{content:" ago"}
 .age.never{color:var(--ink-faint)}
 .age.never::before,.age.never::after{content:""}
+.age.unknown{color:var(--amber)}
+.age.unknown::before,.age.unknown::after{content:""}
 .panel-bd{padding:0 10px;flex:1;min-height:0}
 
 .panel.stale{opacity:.55;border-color:var(--amber)}

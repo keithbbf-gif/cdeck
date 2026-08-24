@@ -16,6 +16,11 @@
   var inflight = false;
   var eventsInflight = false;
 
+  // Connection generation. Bumped on every CONNECT; any in-flight response
+  // carrying an older generation is dropped, so a stale answer from the
+  // previous server can never render into the new server's panels or feed.
+  var gen = 0;
+
   var panels = {
     status: { measuredAtMs: null, error: null },
     health: { measuredAtMs: null, error: null },
@@ -30,6 +35,11 @@
   // Append-only live feed cursor. Never re-request seq <= lastSeq.
   var lastSeq = 0;
   var feedHasEvents = false;
+  // Dedupe ledger for events that arrive WITHOUT a usable numeric seq —
+  // keyed on stable content so they are shown once, not re-added every poll.
+  var seenNoSeq = {};
+  var seenNoSeqOrder = [];
+  var SEEN_NOSEQ_MAX = 500;
   var createKind = null;
   var consoleEntries = [];
 
@@ -106,8 +116,43 @@
       return r.json;
     });
   }
-  function apiGet(path) { return apiCall(path); }
-  function apiPost(path, body) { return apiCall(path, { method: "POST", body: body }); }
+  // Retry with exponential backoff + jitter, on TRANSPORT failures only
+  // (an invoke-level rejection has no e.status; an HTTP error response is
+  // final and is never retried). Timeouts stay in the Rust shell; the
+  // inflight/eventsInflight guards around callers are unchanged — a retry
+  // happens inside the same guarded operation.
+  function backoffDelay(attempt) {
+    var base = 300 * Math.pow(2, attempt); // 300ms, 600ms, 1200ms…
+    return base + Math.random() * base * 0.5;
+  }
+  function apiCallRetry(path, opts, retries) {
+    var attempt = 0;
+    var myGen = gen;
+    function run() {
+      return apiCall(path, opts).catch(function (e) {
+        var isTransport = e && e.status === undefined;
+        if (!isTransport || attempt >= retries || myGen !== gen) throw e;
+        var delay = backoffDelay(attempt);
+        attempt++;
+        return new Promise(function (res) { setTimeout(res, delay); }).then(function () {
+          if (myGen !== gen) throw e; // server changed while waiting — stop retrying
+          return run();
+        });
+      });
+    }
+    return run();
+  }
+  function apiGet(path) { return apiCallRetry(path, undefined, 2); }
+  function apiPost(path, body, retries) {
+    return apiCallRetry(path, { method: "POST", body: body }, retries || 0);
+  }
+
+  // Client-generated request id, sent with every /command POST so a
+  // timeout-then-retry cannot double-execute server-side.
+  function newRequestId() {
+    return "cdeck-" + Date.now().toString(36) + "-" +
+      Math.random().toString(36).slice(2, 10);
+  }
 
   function addConsole(cls, kind, head, body) {
     consoleEntries.push({ tsMs: Date.now(), cls: cls, kind: kind, head: head, body: body });
@@ -142,7 +187,11 @@
       return;
     }
     addConsole("cmd", "", "> " + text, null);
-    apiPost("/api/v1/command", { text: text }).then(function (d) {
+    var myGen = gen;
+    // request_id makes the POST idempotent server-side, which is what makes
+    // the single transport retry below safe.
+    apiPost("/api/v1/command", { text: text, request_id: newRequestId() }, 1).then(function (d) {
+      if (myGen !== gen) return; // response from a previous server — drop
       var pretty = JSON.stringify(d, null, 2);
       if (d && d.error !== undefined && d.error !== null) {
         addConsole("err", String(d.error).toUpperCase(), null, pretty);
@@ -150,6 +199,7 @@
         addConsole("ok", "OK", null, pretty);
       }
     }).catch(function (e) {
+      if (myGen !== gen) return;
       addConsole("err", "TRANSPORT", e.message || String(e), null);
     });
   }
@@ -165,6 +215,9 @@
     b.addEventListener("click", function () { runCommand(this.getAttribute("data-cmd")); });
   });
 
+  // Returns the SERVER's own measurement time, or null when the response
+  // does not carry one. Null means the age is UNKNOWN — never substitute
+  // client Date.now(), which would make a server's stale cache read fresh.
   function extractMs(d) {
     var m = toMs(d.measured_at_epoch);
     if (m !== null) return m;
@@ -422,14 +475,45 @@
     b.addEventListener("click", function () { loadCreate(this.getAttribute("data-kind")); });
   });
 
+  // Coerce an event's seq to a finite number, or null when it is missing
+  // or non-numeric (those events are deduped by content key instead).
+  function eventSeq(ev) {
+    if (typeof ev.seq === "number" && isFinite(ev.seq)) return ev.seq;
+    if (typeof ev.seq === "string" && ev.seq.trim() !== "") {
+      var n = Number(ev.seq);
+      if (isFinite(n)) return n;
+    }
+    return null;
+  }
+
+  function noSeqKey(ev) {
+    return JSON.stringify([ev.t, ev.event, ev.writer, ev.detail]);
+  }
+
+  function rememberNoSeq(key) {
+    seenNoSeq[key] = true;
+    seenNoSeqOrder.push(key);
+    while (seenNoSeqOrder.length > SEEN_NOSEQ_MAX) {
+      delete seenNoSeq[seenNoSeqOrder.shift()];
+    }
+  }
+
+  function resetFeedCursor() {
+    lastSeq = 0;
+    feedHasEvents = false;
+    seenNoSeq = {};
+    seenNoSeqOrder = [];
+  }
+
   function pollEvents() {
     if (!connected || eventsInflight) return;
     eventsInflight = true;
+    var myGen = gen;
     apiGet("/api/v1/events?since_seq=" + lastSeq).then(function (d) {
       eventsInflight = false;
+      if (myGen !== gen) return; // stale response from a previous server — drop
       if (typeof d.head_seq === "number" && d.head_seq < lastSeq) {
-        lastSeq = 0;
-        feedHasEvents = false;
+        resetFeedCursor();
         $("feed").innerHTML = '<div class="empty">ledger rewind — restarting feed at seq 0</div>';
         pollEvents();
         return;
@@ -445,10 +529,23 @@
           feed.innerHTML = "";
         }
       }
+      // Dedupe against the cursor AS OF THIS BATCH, and only advance lastSeq
+      // over events actually accepted — so an out-of-order event inside one
+      // batch (e.g. [5, 3]) is rendered, not permanently skipped.
+      var cursorAtStart = lastSeq;
+      var maxAccepted = lastSeq;
       evs.forEach(function (ev) {
-        var seq = (typeof ev.seq === "number") ? ev.seq : null;
-        if (seq !== null && seq <= lastSeq) return;
-        if (seq !== null && seq > lastSeq) lastSeq = seq;
+        var seq = eventSeq(ev);
+        if (seq !== null) {
+          if (seq <= cursorAtStart) return; // already seen in a prior poll
+          if (seq > maxAccepted) maxAccepted = seq;
+        } else {
+          // No usable seq: stable content key so it appears ONCE, not on
+          // every poll. Never advances the cursor.
+          var key = noSeqKey(ev);
+          if (seenNoSeq[key]) return;
+          rememberNoSeq(key);
+        }
         feedHasEvents = true;
         var row = document.createElement("div");
         row.className = "fevent";
@@ -461,12 +558,14 @@
           (tMs !== null ? humanAge((Date.now() - tMs) / 1000) : "—") + "</span>";
         feed.appendChild(row);
       });
+      lastSeq = maxAccepted;
       while (feed.children.length > FEED_MAX && feed.firstChild) {
         feed.removeChild(feed.firstChild);
       }
       if (evs.length > 0) feed.scrollTop = feed.scrollHeight;
     }).catch(function (e) {
       eventsInflight = false;
+      if (myGen !== gen) return;
       markError("events", e.message || String(e));
     });
   }
@@ -474,7 +573,9 @@
   function markSuccess(name, measuredMs) {
     var p = panels[name];
     p.error = null;
-    p.measuredAtMs = (measuredMs !== null) ? measuredMs : Date.now();
+    p.measuredAtMs = measuredMs; // may be null → age UNKNOWN, shown as such
+    p.ageUnknown = (measuredMs === null);
+    p.hasData = true;
     var el = $("panel-" + name);
     el.classList.remove("error");
     var old = el.querySelector(".errbox");
@@ -494,14 +595,17 @@
       bd.insertBefore(box, bd.firstChild);
     }
     box.innerHTML = "<b>UNREACHABLE</b> — " + esc(msg) +
-      (p.measuredAtMs !== null ? ' <span class="dim">(showing last good data below)</span>' : "");
+      (p.hasData ? ' <span class="dim">(showing last good data below)</span>' : "");
   }
 
   function refreshPanel(name, path, extract, render) {
+    var myGen = gen;
     return apiGet(path).then(function (d) {
+      if (myGen !== gen) return; // stale response from a previous server — drop
       render(d);
       markSuccess(name, extract(d));
     }).catch(function (e) {
+      if (myGen !== gen) return;
       markError(name, e.message || String(e));
     });
   }
@@ -518,6 +622,7 @@
   function refreshAll() {
     if (!connected || inflight) return;
     inflight = true;
+    var myGen = gen;
     var t0 = Date.now();
     var ops = SNAPSHOTS.map(function (s) {
       return refreshPanel(s[0], s[1], s[2], s[3]);
@@ -527,6 +632,12 @@
     }
     Promise.all(ops).then(function () {
       inflight = false;
+      if (myGen !== gen) {
+        // This cycle belongs to a previous server. Let the new generation
+        // refresh immediately instead of judging its banner from old results.
+        if (connected) nextAt = Date.now();
+        return;
+      }
       var snap = SNAPSHOTS.map(function (s) { return s[0]; });
       var anyOk = snap.some(function (k) { return panels[k].error === null && panels[k].measuredAtMs !== null; });
       var allBad = snap.every(function (k) { return panels[k].error !== null; });
@@ -555,8 +666,15 @@
       var el = $("panel-" + name);
       var ageEl = $("age-" + name);
       if (p.measuredAtMs === null) {
-        ageEl.textContent = "no data";
-        ageEl.className = "age never";
+        if (p.ageUnknown && p.error === null) {
+          // Data arrived but the server did not say WHEN it was measured.
+          ageEl.textContent = "age UNKNOWN — no measured_at from server";
+          ageEl.className = "age unknown";
+          el.classList.remove("stale");
+        } else {
+          ageEl.textContent = "no data";
+          ageEl.className = "age never";
+        }
         if (p.error !== null) el.classList.add("error");
         return;
       }
@@ -618,11 +736,13 @@
       return;
     }
     var newBase = parsed.url;
-    lastSeq = 0;
-    feedHasEvents = false;
+    gen++; // new connection generation — in-flight responses from the old server are dropped
+    resetFeedCursor();
     $("feed").innerHTML = '<div class="empty">connecting — the ledger tail streams here</div>';
     panels.events.measuredAtMs = null;
     panels.events.error = null;
+    panels.events.ageUnknown = false;
+    panels.events.hasData = false;
     cfg.base = newBase;
     cfg.token = $("token").value.trim();
     persistUrl(cfg.base);
@@ -665,6 +785,9 @@
       if (url) {
         cfg.base = url;
         $("apiBase").value = url;
+      }
+      if (c && c.warning) {
+        addConsole("err", "CONFIG", String(c.warning), null);
       }
       doConnect();
     }).catch(function () {
