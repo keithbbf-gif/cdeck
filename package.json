@@ -1,0 +1,14 @@
+{
+  "name": "cdeck",
+  "private": true,
+  "version": "0.1.0",
+  "description": "cDeck — standalone Windows 10 dashboard for COSMOS",
+  "scripts": {
+    "tauri": "tauri",
+    "dev": "tauri dev",
+    "build": "tauri build"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2"
+  }
+}

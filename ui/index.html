@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>cDeck — COSMOS</title>
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<header>
+  <h1>c<span>DECK</span> <small>COSMOS</small></h1>
+  <div class="connbar">
+    <label for="apiBase">server</label>
+    <input id="apiBase" type="text" value="http://127.0.0.1:8791" spellcheck="false" autocomplete="off" title="COSMOS HTTP API — loopback, LAN, or Tailscale. Persisted locally.">
+    <label for="token">bearer</label>
+    <input id="token" type="password" value="" spellcheck="false" autocomplete="off" placeholder="optional · never saved" title="Optional bearer. Session memory only — never written to disk.">
+    <button id="btnConnect">CONNECT</button>
+    <span id="connState">not connected</span>
+  </div>
+  <div class="refreshbar">
+    <span id="countdown">refresh idle</span>
+    <button id="btnPause" disabled>PAUSE</button>
+  </div>
+</header>
+
+<div id="downBanner" class="down-banner hidden" role="status">
+  SERVER DOWN — COSMOS is not answering. Panels keep last good data and its measured age. They will not hang.
+</div>
+
+<div class="cmdwrap">
+  <div class="cmdbar">
+    <span class="prompt">&gt;</span>
+    <input id="cmdInput" type="text" placeholder="POST /api/v1/command — try: help" spellcheck="false" autocomplete="off">
+    <button id="btnRun">RUN</button>
+  </div>
+  <div class="quickcmds">
+    <button type="button" data-cmd="status">status</button>
+    <button type="button" data-cmd="audit">audit</button>
+    <button type="button" data-cmd="jobs">jobs</button>
+    <button type="button" data-cmd="help">help</button>
+  </div>
+  <div id="console"><div class="empty">no commands run yet — results appear here</div></div>
+</div>
+
+<div class="grid">
+
+  <section class="panel" id="panel-status">
+    <div class="panel-hd"><h2>STATUS</h2><span class="age never" id="age-status">no data</span></div>
+    <div class="panel-bd" id="bd-status"><div class="empty">not connected — set the COSMOS URL and CONNECT</div></div>
+  </section>
+
+  <section class="panel" id="panel-health">
+    <div class="panel-hd"><h2>HEALTH</h2><span class="age never" id="age-health">no data</span></div>
+    <div class="panel-bd" id="bd-health"><div class="empty">not connected</div></div>
+  </section>
+
+  <section class="panel" id="panel-spend">
+    <div class="panel-hd"><h2>SPEND</h2><span class="age never" id="age-spend">no data</span></div>
+    <div class="panel-bd" id="bd-spend"><div class="empty">not connected</div></div>
+  </section>
+
+  <section class="panel" id="panel-jobs">
+    <div class="panel-hd"><h2>JOBS</h2><span class="age never" id="age-jobs">no data</span></div>
+    <div class="panel-bd" id="bd-jobs"><div class="empty">not connected</div></div>
+  </section>
+
+  <section class="panel" id="panel-rails">
+    <div class="panel-hd"><h2>RAILS</h2><span class="age never" id="age-rails">no data</span></div>
+    <div class="panel-bd" id="bd-rails"><div class="empty">not connected</div></div>
+  </section>
+
+  <section class="panel" id="panel-makers">
+    <div class="panel-hd"><h2>MAKERS</h2><span class="age never" id="age-makers">no data</span></div>
+    <div class="panel-bd" id="bd-makers"><div class="empty">not connected</div></div>
+  </section>
+
+  <section class="panel" id="panel-create">
+    <div class="panel-hd"><h2>CREATE</h2><span class="age never" id="age-create">no data</span></div>
+    <div class="panel-bd" id="bd-create">
+      <div class="quickcmds" id="create-kinds">
+        <button type="button" data-kind="AGENT">Agent</button>
+        <button type="button" data-kind="TOOL">Tool</button>
+        <button type="button" data-kind="CONNECTOR">Connector</button>
+        <button type="button" data-kind="SKILL">Skill</button>
+      </div>
+      <div id="create-cards"><div class="empty">pick a kind — cards list WHERE that kind can be made</div></div>
+    </div>
+  </section>
+
+  <section class="panel" id="panel-events">
+    <div class="panel-hd"><h2>LIVE EVENTS</h2><span class="age never" id="age-events">no data</span></div>
+    <div class="panel-bd">
+      <div id="feed"><div class="empty">not connected — the ledger tail streams here once connected</div></div>
+    </div>
+  </section>
+
+</div>
+
+<footer>
+  <span>cDeck v0.1 — standalone client of the COSMOS HTTP API · server URL persisted · bearer never written to disk</span>
+  <span id="clock"></span>
+</footer>
+
+<script src="app.js"></script>
+</body>
+</html>

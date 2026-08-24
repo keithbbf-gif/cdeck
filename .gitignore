@@ -1,0 +1,25 @@
+# Node
+node_modules/
+npm-debug.log*
+package-lock.json.bak
+
+# Rust / Tauri
+src-tauri/target/
+src-tauri/gen/
+src-tauri/WixTools/
+debug/
+
+# OS / editors
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/
+*.log
+
+# Local secrets — never commit a bearer or token
+*.pem
+*.key
+api_token.txt
+.env
+.env.*
